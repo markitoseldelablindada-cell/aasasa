@@ -17,54 +17,179 @@ if (!ROBLOSECURITY) {
 // Importar fetch correctamente en Node.js
 const fetch = (...args) => import('node-fetch').then(({default: fetch}) => fetch(...args));
 
-// Función para obtener stats reales
+// Función mejorada con retry mechanism
+async function fetchWithRetry(url, headers, retries = 3, delay = 1000) {
+    for (let i = 0; i < retries; i++) {
+        try {
+            const response = await fetch(url, { headers });
+            
+            // Verificar si la respuesta es exitosa
+            if (!response.ok) {
+                if (response.status === 429) { // Rate limit
+                    console.log(`Rate limit detectado, reintento ${i + 1} en ${delay}ms`);
+                    await new Promise(resolve => setTimeout(resolve, delay * (i + 1)));
+                    continue;
+                }
+                throw new Error(`HTTP error! status: ${response.status}`);
+            }
+            
+            const data = await response.json();
+            return data;
+        } catch (error) {
+            console.log(`Intento ${i + 1} fallido:`, error.message);
+            if (i === retries - 1) throw error;
+            await new Promise(resolve => setTimeout(resolve, delay * (i + 1)));
+        }
+    }
+}
+
+// Función para obtener stats reales con mejor manejo de errores
 async function getUserStats(userId) {
     const headers = {
         'Cookie': `.ROBLOSECURITY=${ROBLOSECURITY}`,
-        'User-Agent': 'Mozilla/5.0'
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+        'Accept': 'application/json',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Referer': 'https://www.roblox.com/',
+        'Origin': 'https://www.roblox.com'
     };
 
     try {
-        const friendsRes = await fetch(`https://friends.roblox.com/v1/users/${userId}/friends/count`, { headers });
-        const followersRes = await fetch(`https://friends.roblox.com/v1/users/${userId}/followers/count`, { headers });
-        const followingRes = await fetch(`https://friends.roblox.com/v1/users/${userId}/followings/count`, { headers });
+        console.log(`Obteniendo estadísticas para usuario: ${userId}`);
+        
+        // Obtener amigos (generalmente funciona bien)
+        const friendsData = await fetchWithRetry(
+            `https://friends.roblox.com/v1/users/${userId}/friends/count`, 
+            headers,
+            2, // 2 reintentos para amigos
+            500 // 500ms delay
+        );
 
-        const friendsData = await friendsRes.json();
-        const followersData = await followersRes.json();
-        const followingData = await followingRes.json();
+        // Pequeño delay antes de las siguientes solicitudes
+        await new Promise(resolve => setTimeout(resolve, 300));
 
-        return {
+        // Obtener seguidores (más propenso a fallar)
+        const followersData = await fetchWithRetry(
+            `https://friends.roblox.com/v1/users/${userId}/followers/count`, 
+            headers,
+            3, // 3 reintentos para seguidores
+            800 // 800ms delay
+        );
+
+        // Pequeño delay antes de la última solicitud
+        await new Promise(resolve => setTimeout(resolve, 300));
+
+        // Obtener seguidos (más propenso a fallar)
+        const followingData = await fetchWithRetry(
+            `https://friends.roblox.com/v1/users/${userId}/followings/count`, 
+            headers,
+            3, // 3 reintentos para seguidos
+            800 // 800ms delay
+        );
+
+        const stats = {
             Amigos: friendsData.count || 0,
             Seguidores: followersData.count || 0,
-            Seguidos: followingData.count || 0
+            Seguidos: followingData.count || 0,
+            Timestamp: new Date().toISOString()
         };
+
+        console.log(`Estadísticas obtenidas para ${userId}:`, stats);
+        return stats;
+
     } catch (err) {
-        console.error("Error al obtener datos de Roblox:", err);
-        return { Amigos: 0, Seguidores: 0, Seguidos: 0 };
+        console.error("Error crítico al obtener datos de Roblox:", err.message);
+        return { 
+            Amigos: 0, 
+            Seguidores: 0, 
+            Seguidos: 0,
+            Error: "No se pudieron obtener los datos",
+            Timestamp: new Date().toISOString()
+        };
     }
 }
+
+// Middleware para logging de requests
+app.use((req, res, next) => {
+    console.log(`${new Date().toISOString()} - ${req.method} ${req.path}`);
+    next();
+});
 
 // Endpoint del proxy
 app.get('/stats/:userId', async (req, res) => {
     const userId = req.params.userId;
-    console.log(`Solicitud recibida para usuario: ${userId}`);
     
+    // Validar que el userId sea numérico
+    if (!/^\d+$/.test(userId)) {
+        return res.status(400).json({ 
+            error: "ID de usuario inválido. Debe ser numérico." 
+        });
+    }
+
     try {
         const stats = await getUserStats(userId);
-        console.log(`Estadísticas para ${userId}:`, stats);
         res.json(stats);
     } catch (error) {
         console.error("Error en el endpoint:", error);
-        res.status(500).json({ error: "Error interno del servidor" });
+        res.status(500).json({ 
+            error: "Error interno del servidor",
+            message: error.message 
+        });
     }
 });
 
 // Health check endpoint
 app.get('/', (req, res) => {
-    res.send('Roblox Proxy Server is running!');
+    res.json({ 
+        status: 'online',
+        message: 'Roblox Proxy Server is running!',
+        timestamp: new Date().toISOString()
+    });
+});
+
+// Endpoint para verificar la cookie
+app.get('/verify', async (req, res) => {
+    try {
+        const testResponse = await fetch('https://users.roblox.com/v1/users/authenticated', {
+            headers: {
+                'Cookie': `.ROBLOSECURITY=${ROBLOSECURITY}`,
+                'User-Agent': 'Mozilla/5.0'
+            }
+        });
+
+        if (testResponse.ok) {
+            const userData = await testResponse.json();
+            res.json({ 
+                authenticated: true, 
+                username: userData.name,
+                userId: userData.id 
+            });
+        } else {
+            res.json({ 
+                authenticated: false, 
+                error: 'Cookie inválida o expirada' 
+            });
+        }
+    } catch (error) {
+        res.json({ 
+            authenticated: false, 
+            error: error.message 
+        });
+    }
+});
+
+// Manejo de errores global
+app.use((error, req, res, next) => {
+    console.error('Error no manejado:', error);
+    res.status(500).json({ 
+        error: 'Error interno del servidor',
+        message: error.message 
+    });
 });
 
 // Iniciar servidor
 app.listen(port, () => {
-    console.log(`Proxy corriendo en puerto ${port}`);
+    console.log(`🚀 Proxy corriendo en puerto ${port}`);
+    console.log(`📊 Endpoint: http://localhost:${port}/stats/{userId}`);
+    console.log(`🔍 Verificar cookie: http://localhost:${port}/verify`);
 });
