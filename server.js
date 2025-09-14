@@ -41,7 +41,7 @@ const getHeaders = () => ({
     'X-Requested-With': 'XMLHttpRequest'
 });
 
-// Función con retry automático y rate limiting
+// Función con retry automático y rate limiting - CORREGIDA
 async function fetchWithRetry(url, options, retries = 2) {
     for (let i = 0; i < retries; i++) {
         try {
@@ -59,7 +59,11 @@ async function fetchWithRetry(url, options, retries = 2) {
             
             return await response.json();
         } catch (error) {
-            if (i === retries - 1) throw error;
+            console.log(`❌ Intento ${i + 1} fallido para ${url}: ${error.message}`);
+            if (i === retries - 1) {
+                // Si todos los reintentos fallan, devolver un objeto seguro
+                return { count: 0, error: error.message };
+            }
             await new Promise(resolve => setTimeout(resolve, 500 * (i + 1)));
         }
     }
@@ -84,7 +88,7 @@ async function getUserStats(userId) {
         const friendsData = await fetchWithRetry(
             `https://friends.roblox.com/v1/users/${userId}/friends/count`, 
             { headers }
-        ).catch(() => ({ count: 0 }));
+        );
 
         // Pequeña pausa entre requests
         await new Promise(resolve => setTimeout(resolve, 200));
@@ -92,19 +96,20 @@ async function getUserStats(userId) {
         const followersData = await fetchWithRetry(
             `https://friends.roblox.com/v1/users/${userId}/followers/count`, 
             { headers }
-        ).catch(() => ({ count: 0 }));
+        );
 
         await new Promise(resolve => setTimeout(resolve, 200));
 
         const followingData = await fetchWithRetry(
             `https://friends.roblox.com/v1/users/${userId}/followings/count`, 
             { headers }
-        ).catch(() => ({ count: 0 }));
+        );
 
+        // Asegurarse de que siempre tenemos objetos válidos
         const stats = {
-            Amigos: friendsData.count || 0,
-            Seguidores: followersData.count || 0,
-            Seguidos: followingData.count || 0,
+            Amigos: friendsData?.count || 0,
+            Seguidores: followersData?.count || 0,
+            Seguidos: followingData?.count || 0,
             Timestamp: new Date().toISOString(),
             Status: 'live'
         };
