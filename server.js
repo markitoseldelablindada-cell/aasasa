@@ -17,112 +17,119 @@ if (!ROBLOSECURITY) {
 // Importar fetch correctamente en Node.js
 const fetch = (...args) => import('node-fetch').then(({default: fetch}) => fetch(...args));
 
-// Función mejorada con retry mechanism
-async function fetchWithRetry(url, headers, retries = 3, delay = 1000) {
-    for (let i = 0; i < retries; i++) {
-        try {
-            const response = await fetch(url, { headers });
-            
-            // Verificar si la respuesta es exitosa
-            if (!response.ok) {
-                if (response.status === 429) { // Rate limit
-                    console.log(`Rate limit detectado, reintento ${i + 1} en ${delay}ms`);
-                    await new Promise(resolve => setTimeout(resolve, delay * (i + 1)));
-                    continue;
-                }
-                throw new Error(`HTTP error! status: ${response.status}`);
-            }
-            
-            const data = await response.json();
-            return data;
-        } catch (error) {
-            console.log(`Intento ${i + 1} fallido:`, error.message);
-            if (i === retries - 1) throw error;
-            await new Promise(resolve => setTimeout(resolve, delay * (i + 1)));
-        }
-    }
-}
+// Headers optimizados para velocidad
+const ROBLOX_HEADERS = {
+    'Cookie': `.ROBLOSECURITY=${ROBLOSECURITY}`,
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+    'Accept': 'application/json',
+    'Accept-Language': 'en-US,en;q=0.9',
+    'X-CSRF-TOKEN': 'undefined', // Algunas APIs de Roblox lo requieren
+    'Referer': 'https://www.roblox.com/',
+};
 
-// Función para obtener stats reales con mejor manejo de errores
+// Cache simple para evitar solicitudes repetidas en corto tiempo
+const requestCache = new Map();
+const CACHE_TTL = 5000; // 5 segundos de cache
+
+// Función ultra-rápida con fallback inteligente
 async function getUserStats(userId) {
-    const headers = {
-        'Cookie': `.ROBLOSECURITY=${ROBLOSECURITY}`,
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-        'Accept': 'application/json',
-        'Accept-Language': 'en-US,en;q=0.9',
-        'Referer': 'https://www.roblox.com/',
-        'Origin': 'https://www.roblox.com'
-    };
+    const cacheKey = `stats_${userId}`;
+    const cached = requestCache.get(cacheKey);
+    
+    // Devolver datos cacheados si están frescos
+    if (cached && (Date.now() - cached.timestamp) < CACHE_TTL) {
+        console.log(`✅ Devolviendo datos cacheados para ${userId}`);
+        return cached.data;
+    }
 
     try {
-        console.log(`Obteniendo estadísticas para usuario: ${userId}`);
+        console.log(`⚡ Obteniendo estadísticas en tiempo real para: ${userId}`);
         
-        // Obtener amigos (generalmente funciona bien)
-        const friendsData = await fetchWithRetry(
-            `https://friends.roblox.com/v1/users/${userId}/friends/count`, 
-            headers,
-            2, // 2 reintentos para amigos
-            500 // 500ms delay
-        );
+        // Hacer todas las solicitudes simultáneamente para máxima velocidad
+        const [friendsRes, followersRes, followingRes] = await Promise.allSettled([
+            fetch(`https://friends.roblox.com/v1/users/${userId}/friends/count`, { 
+                headers: ROBLOX_HEADERS,
+                timeout: 3000 
+            }),
+            fetch(`https://friends.roblox.com/v1/users/${userId}/followers/count`, { 
+                headers: ROBLOX_HEADERS,
+                timeout: 3000 
+            }),
+            fetch(`https://friends.roblox.com/v1/users/${userId}/followings/count`, { 
+                headers: ROBLOX_HEADERS,
+                timeout: 3000 
+            })
+        ]);
 
-        // Pequeño delay antes de las siguientes solicitudes
-        await new Promise(resolve => setTimeout(resolve, 300));
-
-        // Obtener seguidores (más propenso a fallar)
-        const followersData = await fetchWithRetry(
-            `https://friends.roblox.com/v1/users/${userId}/followers/count`, 
-            headers,
-            3, // 3 reintentos para seguidores
-            800 // 800ms delay
-        );
-
-        // Pequeño delay antes de la última solicitud
-        await new Promise(resolve => setTimeout(resolve, 300));
-
-        // Obtener seguidos (más propenso a fallar)
-        const followingData = await fetchWithRetry(
-            `https://friends.roblox.com/v1/users/${userId}/followings/count`, 
-            headers,
-            3, // 3 reintentos para seguidos
-            800 // 800ms delay
-        );
-
-        const stats = {
-            Amigos: friendsData.count || 0,
-            Seguidores: followersData.count || 0,
-            Seguidos: followingData.count || 0,
-            Timestamp: new Date().toISOString()
+        // Procesar respuestas con fallback a 0 si fallan
+        const processResponse = (result, defaultValue = 0) => {
+            if (result.status === 'fulfilled' && result.value.ok) {
+                return result.value.json().then(data => data.count || defaultValue);
+            }
+            return defaultValue;
         };
 
-        console.log(`Estadísticas obtenidas para ${userId}:`, stats);
+        const [amigos, seguidores, seguidos] = await Promise.all([
+            processResponse(friendsRes),
+            processResponse(followersRes),
+            processResponse(followingRes)
+        ]);
+
+        const stats = {
+            Amigos: amigos,
+            Seguidores: seguidores,
+            Seguidos: seguidos,
+            Timestamp: new Date().toISOString(),
+            Status: 'live'
+        };
+
+        // Guardar en cache
+        requestCache.set(cacheKey, {
+            data: stats,
+            timestamp: Date.now()
+        });
+
+        console.log(`✅ Datos obtenidos instantáneamente para ${userId}`);
         return stats;
 
-    } catch (err) {
-        console.error("Error crítico al obtener datos de Roblox:", err.message);
+    } catch (error) {
+        console.error(`❌ Error crítico para ${userId}:`, error.message);
+        
+        // Devolver datos de cache aunque estén viejos como fallback
+        if (cached) {
+            console.log(`🔄 Usando datos cacheados como fallback para ${userId}`);
+            return { ...cached.data, Status: 'cached_fallback' };
+        }
+
         return { 
             Amigos: 0, 
             Seguidores: 0, 
             Seguidos: 0,
-            Error: "No se pudieron obtener los datos",
-            Timestamp: new Date().toISOString()
+            Timestamp: new Date().toISOString(),
+            Status: 'error',
+            Error: "No se pudieron obtener los datos"
         };
     }
 }
 
-// Middleware para logging de requests
+// Middleware para logging rápido
 app.use((req, res, next) => {
-    console.log(`${new Date().toISOString()} - ${req.method} ${req.path}`);
+    const start = Date.now();
+    res.on('finish', () => {
+        console.log(`🚀 ${req.method} ${req.path} - ${Date.now() - start}ms`);
+    });
     next();
 });
 
-// Endpoint del proxy
+// Endpoint ultra rápido
 app.get('/stats/:userId', async (req, res) => {
     const userId = req.params.userId;
     
-    // Validar que el userId sea numérico
+    // Validación rápida
     if (!/^\d+$/.test(userId)) {
         return res.status(400).json({ 
-            error: "ID de usuario inválido. Debe ser numérico." 
+            error: "ID de usuario inválido",
+            Status: 'error'
         });
     }
 
@@ -130,66 +137,46 @@ app.get('/stats/:userId', async (req, res) => {
         const stats = await getUserStats(userId);
         res.json(stats);
     } catch (error) {
-        console.error("Error en el endpoint:", error);
+        console.error("Error en endpoint:", error);
         res.status(500).json({ 
-            error: "Error interno del servidor",
-            message: error.message 
+            Amigos: 0, 
+            Seguidores: 0, 
+            Seguidos: 0,
+            Status: 'error',
+            Error: error.message
         });
     }
 });
 
-// Health check endpoint
+// Health check rápido
 app.get('/', (req, res) => {
     res.json({ 
         status: 'online',
-        message: 'Roblox Proxy Server is running!',
+        message: 'Roblox Proxy Server - Ultra Fast Mode',
         timestamp: new Date().toISOString()
     });
 });
 
-// Endpoint para verificar la cookie
-app.get('/verify', async (req, res) => {
-    try {
-        const testResponse = await fetch('https://users.roblox.com/v1/users/authenticated', {
-            headers: {
-                'Cookie': `.ROBLOSECURITY=${ROBLOSECURITY}`,
-                'User-Agent': 'Mozilla/5.0'
-            }
-        });
-
-        if (testResponse.ok) {
-            const userData = await testResponse.json();
-            res.json({ 
-                authenticated: true, 
-                username: userData.name,
-                userId: userData.id 
-            });
-        } else {
-            res.json({ 
-                authenticated: false, 
-                error: 'Cookie inválida o expirada' 
-            });
+// Limpiar cache periódicamente
+setInterval(() => {
+    const now = Date.now();
+    let cleaned = 0;
+    
+    for (const [key, value] of requestCache.entries()) {
+        if (now - value.timestamp > CACHE_TTL * 2) {
+            requestCache.delete(key);
+            cleaned++;
         }
-    } catch (error) {
-        res.json({ 
-            authenticated: false, 
-            error: error.message 
-        });
     }
-});
-
-// Manejo de errores global
-app.use((error, req, res, next) => {
-    console.error('Error no manejado:', error);
-    res.status(500).json({ 
-        error: 'Error interno del servidor',
-        message: error.message 
-    });
-});
+    
+    if (cleaned > 0) {
+        console.log(`🧹 Limpiados ${cleaned} items del cache`);
+    }
+}, 30000); // Cada 30 segundos
 
 // Iniciar servidor
 app.listen(port, () => {
-    console.log(`🚀 Proxy corriendo en puerto ${port}`);
+    console.log(`⚡ Proxy ULTRA-RÁPIDO corriendo en puerto ${port}`);
     console.log(`📊 Endpoint: http://localhost:${port}/stats/{userId}`);
-    console.log(`🔍 Verificar cookie: http://localhost:${port}/verify`);
+    console.log(`⏱️  Modo: Instantáneo (0 delays)`);
 });
